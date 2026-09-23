@@ -1,25 +1,54 @@
 {
   "expo": {
-    "name": "myNoteApp",
+    "name": "myNote",
     "slug": "myNoteApp",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/ic_launcher_foreground.png",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "foregroundImage": "./assets/ic_launcher_foreground.png",
+        "backgroundImage": "./assets/ic_launcher_background.png",
+        "monochromeImage": "./assets/ic_launcher_monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "softwareKeyboardLayoutMode": "resize",
+      "predictiveBackGestureEnabled": false,
+      "package": "com.nlula.myNoteApp",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-font",
+      "expo-sharing",
+      "expo-build-properties",
+      "expo-video",
+      "expo-audio",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "myNote needs access to your photo library to attach images and videos.",
+          "cameraPermission": "myNote uses the camera to take photos and videos for note attachments."
+        }
+      ],
+      "react-native-quick-crypto"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "fcb315aa-5913-4011-b3eb-1c3a76a4fbfb"
+      }
+    },
+    "owner": "nlula"
   }
 }
