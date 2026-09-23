@@ -18,6 +18,10 @@
       "softwareKeyboardLayoutMode": "resize",
       "predictiveBackGestureEnabled": false,
       "package": "com.nlula.myNoteApp",
+      "versionCode": 2,
+      "runtimeVersion": {
+        "policy": "fingerprint"
+      },
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS",
@@ -48,6 +52,9 @@
       "eas": {
         "projectId": "fcb315aa-5913-4011-b3eb-1c3a76a4fbfb"
       }
+    },
+    "updates": {
+      "url": "https://u.expo.dev/fcb315aa-5913-4011-b3eb-1c3a76a4fbfb"
     },
     "owner": "nlula"
   }

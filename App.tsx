@@ -1,8 +1,8 @@
 import { useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { NavigationContainer, DarkTheme, DefaultTheme } from '@react-navigation/native';
+import { NavigationContainer, DarkTheme, DefaultTheme, createNavigationContainerRef } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { Pressable } from 'react-native';
+import { AppState, Pressable } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import * as NavigationBar from 'expo-navigation-bar';
@@ -14,9 +14,30 @@ import SettingsScreen from './screens/SettingsScreen';
 import { ThemeProvider, useThemeCtx } from './themeContext';
 import { getConfig } from './lib/github';
 import { getActiveProvider } from './lib/syncProvider';
-import { runSync } from './lib/syncStatus';
+import { runSync, isSyncing } from './lib/syncStatus';
+import { ensureScratchNote } from './notes';
 
 const Stack = createNativeStackNavigator();
+const navigationRef = createNavigationContainerRef<any>();
+
+// Shortest gap between the syncs fired when the app leaves or re-enters the
+// foreground. A quiet sync is one API call and a few seconds of hashing, so
+// this can be short; it exists to stop rapid app-switching stacking them up.
+const EDGE_SYNC_THROTTLE_MS = 30000;
+
+/**
+ * Open straight into the scratch note, on top of the note list so Back still
+ * reaches it. Runs once per launch — onReady fires when the container mounts,
+ * not on re-render or when the app returns from the background.
+ */
+function openScratchNote() {
+  try {
+    const { name, caret } = ensureScratchNote();
+    navigationRef.navigate('Editor', caret === null ? { name } : { name, startOffset: caret });
+  } catch (e: any) {
+    console.warn('[scratch] could not open the blank note:', e?.message);
+  }
+}
 
 function useAutoSync() {
   useEffect(() => {
@@ -38,7 +59,44 @@ function useAutoSync() {
         console.warn('[autosync] tick error:', e?.message);
       }
     }, 10000);
-    return () => clearInterval(tick);
+
+    // The scheduled tick only runs while the app is in the foreground, so both
+    // edges of a foreground session deserve a sync of their own:
+    //
+    //   leaving  → push what was just written, while the app is still alive.
+    //              Best effort: once swiped away Android may kill the process
+    //              mid-upload. Nothing is corrupted either way — a write lands
+    //              or it doesn't — and the next sync carries whatever didn't.
+    //   resuming → pull what another device changed while we were away, rather
+    //              than showing stale notes until the next tick.
+    //
+    // Both edges share one throttle, so bouncing between apps doesn't start a
+    // sync every few seconds. Sharing it is also correct: runSync is
+    // bidirectional, so a push seconds ago already collected remote changes.
+    let lastEdgeRun = 0;
+    const sub = AppState.addEventListener('change', (state) => {
+      const resuming = state === 'active';
+      if (Date.now() - lastEdgeRun < EDGE_SYNC_THROTTLE_MS) return;
+      lastEdgeRun = Date.now();
+      const what = resuming ? 'resume' : 'background';
+      (async () => {
+        try {
+          const provider = await getActiveProvider();
+          const cfg = await getConfig();
+          // Honour "Never": that setting means manual-only, edges included.
+          if (provider !== 'github' || !cfg.connected || cfg.syncInterval <= 0) return;
+          if (isSyncing()) return;
+          console.log(`[autosync] app ${resuming ? 'resumed → pulling from' : 'leaving foreground → pushing to'} GitHub`);
+          lastRun = Date.now();
+          await runSync();
+          console.log(`[autosync] ${what} sync finished`);
+        } catch (e: any) {
+          console.warn(`[autosync] ${what} sync did not finish:`, e?.message);
+        }
+      })();
+    });
+
+    return () => { clearInterval(tick); sub.remove(); };
   }, []);
 }
 
@@ -65,7 +123,7 @@ function Root() {
   };
 
   return (
-    <NavigationContainer theme={navTheme}>
+    <NavigationContainer ref={navigationRef} theme={navTheme} onReady={openScratchNote}>
       <Stack.Navigator
         screenOptions={{
           headerStyle: { backgroundColor: t.bgSurface },

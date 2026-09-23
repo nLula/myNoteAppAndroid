@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -9,6 +9,8 @@ import {
   autoSaveNoteBody,
   recordNoteHistory,
   cleanUpRemovedAttachments,
+  isScratchNote,
+  promoteScratchNote,
   saveLockedSession,
   closeLockedSession,
   readActiveSessionBody,
@@ -149,7 +151,9 @@ export default function EditorScreen({ route, navigation }: any) {
   }
 
   function navTitleFromContent(text: string): string {
-    const m = text.match(/^#\s+(.+)/m);
+    // `[ \t]` not `\s` — see extractTitle in notes.ts: `\s` matches the newline,
+    // so an empty heading would pick up the first line of the body.
+    const m = text.match(/^#[ \t]+(.+)/m);
     return m ? m[1].trim() : name.replace(/\.md$/, '');
   }
 
@@ -246,9 +250,35 @@ export default function EditorScreen({ route, navigation }: any) {
       if (!isLockedSession) {
         recordNoteHistory(name, initialBodyRef.current, contentRef.current);
         cleanUpRemovedAttachments(name, initialBodyRef.current, contentRef.current);
+        // Last, so the content and history are written under the old name and
+        // then carried across: a named scratch note graduates to a real one.
+        if (isScratchNote(name)) {
+          try {
+            const promoted = promoteScratchNote();
+            if (promoted) console.log(`[scratch] saved as ${promoted}`);
+          } catch (e: any) {
+            console.warn('[scratch] could not save under its new name:', e?.message);
+          }
+        }
       }
     };
   }, [name]);
+
+  // Leaving the foreground can be the last code this screen ever runs — a
+  // swiped-away app is killed moments later, and neither beforeRemove nor the
+  // unmount cleanup fire for that. Write the pending edit now instead of
+  // waiting out the 500ms autosave debounce.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') return;
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      persist(contentRef.current);
+    });
+    return () => sub.remove();
+  }, [name, isLockedSession]);
 
   function onChange(text: string) {
     setContent(text);

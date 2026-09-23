@@ -174,12 +174,99 @@ function isTrashedFm(fm: string): boolean {
 function extractTitle(content: string, fallbackName: string): string {
   const parsed = parseFrontmatter(content);
   const body = parsed ? parsed.body : content;
-  const m = body.match(/^#\s+(.+)/m);
-  if (m) return m[1].trim();
+  // `[ \t]` rather than `\s`, which would match the newline and let a note whose
+  // heading is empty take its first body line as the title. A heading of only
+  // spaces is no title either, so fall through to the filename below.
+  const m = body.match(/^#[ \t]+(.+)/m);
+  const heading = m ? m[1].trim() : '';
+  if (heading) return heading;
   // Strip the _XXXXXXXX random suffix added by generateNoteFilename
   const base = fallbackName.replace(/\.md$/, '');
   const sm = base.match(/^(.+)_[A-Za-z0-9]{8}$/);
   return sm ? sm[1] : base;
+}
+
+// ---------------------------------------------------------------------------
+// Scratch note
+//
+// The app opens straight into an empty note on every launch, so there is always
+// somewhere to start typing. It lives under one fixed filename rather than the
+// usual "Title_XXXXXXXX.md", so it can be found again next launch. That makes
+// the name reserved: a note the user titles "no_name" is stored as no_name1,
+// no_name2, … instead, while the heading they typed is left alone.
+// ---------------------------------------------------------------------------
+
+export const SCRATCH_BASE = 'no_name';
+export const SCRATCH_NOTE = `${SCRATCH_BASE}.md`;
+/**
+ * What a fresh scratch note contains: a heading marker waiting for a name, and
+ * a blank line under it. The caret goes at the end — in the body — so typing
+ * starts on the content, not on the heading.
+ */
+export const SCRATCH_TEMPLATE = '# \n\n';
+
+export function isScratchNote(name: string): boolean {
+  return name === SCRATCH_NOTE;
+}
+
+/** Body of a note file, frontmatter stripped, read synchronously. */
+function bodyOf(file: File): string {
+  const content = file.textSync();
+  const parsed = parseFrontmatter(content);
+  return parsed ? parsed.body : content;
+}
+
+/**
+ * The heading typed into a note, or null while it is still just "# ".
+ * `[ \t]` rather than `\s`: `\s` matches newlines, so "# " followed by body
+ * text would treat that body's first line as the heading.
+ */
+function headingOf(body: string): string | null {
+  const m = body.match(/^#[ \t]+(.+)/m);
+  const t = m ? m[1].trim() : '';
+  return t ? t : null;
+}
+
+/**
+ * Makes sure the scratch note exists and reports where the caret belongs.
+ * `caret` is non-null only while the note is still untouched, so a launch into
+ * a blank note lands ready to type but one with work in it does not steal focus.
+ */
+export function ensureScratchNote(): { name: string; caret: number | null } {
+  ensureDir(notesDirInstance);
+  // Graduate a scratch note that was named but never left the editor — the app
+  // was killed instead, so the unmount never ran. Doing it here as well means a
+  // launch always starts blank, however the last session ended. No-op when the
+  // note is still unnamed or absent.
+  promoteScratchNote();
+  const file = new File(notesDirInstance, SCRATCH_NOTE);
+  if (!file.exists) {
+    file.create();
+    file.write(SCRATCH_TEMPLATE);
+    return { name: SCRATCH_NOTE, caret: SCRATCH_TEMPLATE.length };
+  }
+  const body = bodyOf(file);
+  const untouched = body.trim() === '' || body.trim() === '#';
+  return { name: SCRATCH_NOTE, caret: untouched ? body.length : null };
+}
+
+/**
+ * Once the scratch note has a heading it becomes a note like any other: it is
+ * renamed after that heading, which also frees "no_name.md" so the next launch
+ * starts a fresh blank one. Returns the new filename, or null if it is still
+ * unnamed and should stay the scratch note.
+ */
+export function promoteScratchNote(): string | null {
+  const file = new File(notesDirInstance, SCRATCH_NOTE);
+  if (!file.exists) return null;
+  const title = headingOf(bodyOf(file));
+  if (!title) return null;
+
+  const newName = generateNoteFilename(title);
+  file.moveSync(new File(notesDirInstance, newName));
+  const hist = new File(notesDirInstance, historyName(SCRATCH_NOTE));
+  if (hist.exists) hist.moveSync(new File(notesDirInstance, historyName(newName)));
+  return newName;
 }
 
 const SUFFIX_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -200,11 +287,42 @@ function randomAlphaNum(len: number): string {
 export function generateNoteFilename(title: string): string {
   ensureDir(notesDirInstance);
   const deleted = getDeletedPaths();
+  const base = reserveScratchBase(title, deleted);
   for (let attempt = 0; attempt < 20; attempt++) {
-    const name = `${title}_${randomAlphaNum(8)}.md`;
+    const name = `${base}_${randomAlphaNum(8)}.md`;
     if (!new File(notesDirInstance, name).exists && !deleted.has(name)) return name;
   }
-  return `${title}_${Date.now().toString(36)}.md`;
+  return `${base}_${Date.now().toString(36)}.md`;
+}
+
+/**
+ * "no_name" belongs to the scratch note, so a note the user titles that is
+ * filed as no_name1, no_name2, … Only the filename shifts — the heading keeps
+ * whatever they typed. Any other title is returned untouched.
+ */
+function reserveScratchBase(title: string, deleted: Set<string>): string {
+  if (title.trim().toLowerCase() !== SCRATCH_BASE) return title;
+  for (let n = 1; n < 1000; n++) {
+    const candidate = `${SCRATCH_BASE}${n}`;
+    if (!baseNameTaken(candidate, deleted)) return candidate;
+  }
+  return `${SCRATCH_BASE}${Date.now().toString(36)}`;
+}
+
+/** True when any note file — present or already deleted — uses this base name. */
+function baseNameTaken(base: string, deleted: Set<string>): boolean {
+  const lower = base.toLowerCase();
+  const used = (fileName: string) => {
+    const f = fileName.toLowerCase();
+    return f === `${lower}.md` || f.startsWith(`${lower}_`);
+  };
+  for (const e of notesDirInstance.list()) {
+    if (e instanceof File && e.name.endsWith('.md') && used(e.name)) return true;
+  }
+  for (const p of deleted) {
+    if (p.endsWith('.md') && used(p)) return true;
+  }
+  return false;
 }
 
 function ensureDir(dir: Directory) {
