@@ -42,6 +42,28 @@ function openScratchNote() {
 function useAutoSync() {
   useEffect(() => {
     let lastRun = 0;
+
+    // Sync as soon as the app opens rather than waiting out the first tick. The
+    // app launches straight into a note, so until this lands the screen is
+    // showing whatever the last session left on disk. Deliberately a beat late:
+    // hashing every note blocks JS for a couple of seconds, and doing that
+    // during the opening frames makes the launch stutter. The editor swaps in
+    // the pulled text when this finishes.
+    const launchSync = setTimeout(async () => {
+      try {
+        const provider = await getActiveProvider();
+        const cfg = await getConfig();
+        if (provider !== 'github' || !cfg.connected || cfg.syncInterval <= 0) return;
+        if (isSyncing()) return;
+        lastRun = Date.now();
+        console.log('[autosync] app opened → syncing before showing stale text');
+        await runSync();
+        console.log('[autosync] launch sync finished');
+      } catch (e: any) {
+        console.warn('[autosync] launch sync failed:', e?.message);
+      }
+    }, 600);
+
     const tick = setInterval(async () => {
       try {
         const provider = await getActiveProvider();
@@ -96,7 +118,7 @@ function useAutoSync() {
       })();
     });
 
-    return () => { clearInterval(tick); sub.remove(); };
+    return () => { clearTimeout(launchSync); clearInterval(tick); sub.remove(); };
   }, []);
 }
 

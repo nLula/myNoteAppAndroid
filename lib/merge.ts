@@ -47,17 +47,85 @@ function changeOpcodes(base: string[], target: string[]): Opcode[] {
   return ops;
 }
 
+const stripEnd = (ln: string): string => ln.replace(/\s+$/, '');
+const isBlankLine = (ln: string): boolean => ln.trim() === '';
+
+function dropTrailingBlanks(lines: string[]): string[] {
+  let b = lines.length;
+  while (b > 0 && isBlankLine(lines[b - 1])) b -= 1;
+  return lines.slice(0, b);
+}
+
+function dropLeadingBlanks(lines: string[]): string[] {
+  let a = 0;
+  while (a < lines.length && isBlankLine(lines[a])) a += 1;
+  return lines.slice(a);
+}
+
+/**
+ * Two blocks back to back with exactly one blank line between them. Only the
+ * seam is normalised — blank lines the author put at the start of the first
+ * block or the end of the second are theirs and are left alone, so merging
+ * doesn't reflow the surrounding text.
+ */
+function joinBlocks(first: string[], second: string[]): string[] {
+  if (!first.length) return second;
+  if (!second.length) return first;
+  const a = dropTrailingBlanks(first);
+  const b = dropLeadingBlanks(second);
+  if (!a.length) return b;
+  if (!b.length) return a;
+  const out = [...a];
+  const last = out[out.length - 1];
+  if (!last.endsWith('\n')) out[out.length - 1] = `${last}\n`;
+  out.push('\n');
+  return [...out, ...b];
+}
+
+/**
+ * Append a block, ending it on a line boundary. A conflict marker written after
+ * an unterminated line would otherwise be glued to the end of that text —
+ * "...last words=======" — which no longer reads as a marker at all.
+ */
+function pushTerminated(out: string[], block: string[]): void {
+  if (!block.length) return;
+  out.push(...block.slice(0, -1));
+  const last = block[block.length - 1];
+  out.push(last.endsWith('\n') ? last : `${last}\n`);
+}
+
+/** When each side was last edited, in epoch seconds. Null when unknown. */
+export type MergeTimes = { localAt?: number | null; remoteAt?: number | null };
+
 /**
  * 3-way line merge, ported from myNote.py's _merge_texts.
  * Returns [mergedText, hadConflicts].
+ *
+ * `times` orders the case where both sides added text at the same place: the
+ * older addition goes above the newer one, so a note reads as a timeline. With
+ * no timestamps it falls back to the historical remote-then-local order.
  */
-export function mergeTexts(base: string, local: string, remote: string): [string, boolean] {
+export function mergeTexts(
+  base: string,
+  local: string,
+  remote: string,
+  times: MergeTimes = {}
+): [string, boolean] {
   const splitKeep = (s: string): string[] => s.match(/[^\n]*\n|[^\n]+$/g) ?? [];
 
   // Normalise line endings before diffing: the PC historically saved CRLF while
   // this app saves LF, making otherwise-identical lines compare as different and
   // defeating both the diff and the insertion dedupe. Merged output is always LF.
-  const norm = (s: string): string => s.replace(/\r\n?/g, '\n');
+  //
+  // Also guarantee a trailing newline. The editor saves exactly what was typed,
+  // so a note almost never ends with one — and then appending text *modifies*
+  // the last line instead of inserting after it. Both sides end up replacing the
+  // same line, so two independent appends collide as a conflict rather than
+  // merging. Terminating every side first makes an append a true insertion.
+  const norm = (s: string): string => {
+    const lf = s.replace(/\r\n?/g, '\n');
+    return lf.length > 0 && !lf.endsWith('\n') ? `${lf}\n` : lf;
+  };
 
   const b = splitKeep(norm(base));
   const l = splitKeep(norm(local));
@@ -130,27 +198,40 @@ export function mergeTexts(base: string, local: string, remote: string): [string
         li += 1;
         ri += 1;
       } else if (lHere.i1 === lHere.i2 && rHere.i1 === rHere.i2) {
-        // Dedupe ignoring trailing whitespace so a CRLF/trailing-space variant
-        // of the same line doesn't get inserted twice.
-        const mergedIns = [...rc];
-        const stripped = new Set(rc.map(ln => ln.replace(/\s+$/, '')));
-        for (const line of lc) {
-          const key = line.replace(/\s+$/, '');
-          if (!stripped.has(key)) {
-            mergedIns.push(line);
-            stripped.add(key);
-          }
-        }
-        out.push(...mergedIns);
+        // Both sides added text at the same point, so neither overwrote the
+        // other — keep both, oldest first, so the note reads chronologically.
+        // Equal or unknown timestamps keep the original remote-then-local order.
+        const { localAt, remoteAt } = times;
+        const remoteFirst =
+          typeof localAt === 'number' && typeof remoteAt === 'number'
+            ? remoteAt <= localAt
+            : true;
+        const firstBlock = remoteFirst ? rc : lc;
+        const secondBlock = remoteFirst ? lc : rc;
+
+        // Drop lines the other side already contributed, comparing without
+        // trailing whitespace so a CRLF variant isn't treated as different.
+        // Blank lines are never deduped — they carry the paragraph structure,
+        // and removing them would run separate paragraphs together.
+        const seen = new Set(firstBlock.filter(ln => !isBlankLine(ln)).map(stripEnd));
+        const extra = secondBlock.filter(ln => {
+          if (isBlankLine(ln)) return true;
+          const key = stripEnd(ln);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+
+        out.push(...joinBlocks(firstBlock, extra));
         li += 1;
         ri += 1;
       } else {
         const conflictEnd = Math.max(lHere.i2, rHere.i2);
         hadConflicts = true;
         out.push('<<<<<<< local\n');
-        out.push(...lc);
+        pushTerminated(out, lc);
         out.push('=======\n');
-        out.push(...rc);
+        pushTerminated(out, rc);
         out.push('>>>>>>> github\n');
         pos = conflictEnd;
         while (li < lCh.length && lCh[li].i1 < conflictEnd) li += 1;

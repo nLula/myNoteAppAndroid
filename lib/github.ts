@@ -26,12 +26,29 @@ function mergeHistoryContent(localContent: string, remoteContent: string): strin
   }
 }
 
+/**
+ * The unnamed placeholder note is a permanent fixture, not a real note: it gets
+ * emptied and reused rather than created and destroyed. Recording it as deleted
+ * makes every device refuse it, so typing into it on the phone appears to save
+ * while the note never actually syncs. Entries for it are dropped on every
+ * merge, which also heals logs that already carry one — the merged document is
+ * what gets written locally and pushed, so the entry leaves the shared copy too.
+ */
+const PLACEHOLDER_NOTE_BASE = 'no_name';
+
+function isPlaceholderDeletion(e: DeletionEntry): boolean {
+  if (e.type !== 'note') return false;
+  const stem = String(e.path).replace(/\.md$/i, '');
+  return stem.replace(/_[A-Za-z0-9]{8}$/, '').toLowerCase() === PLACEHOLDER_NOTE_BASE;
+}
+
 function mergeDeletionsContent(localContent: string, remoteContent: string): string {
   try {
     const local = JSON.parse(localContent) as DeletionsDoc;
     const remote = JSON.parse(remoteContent) as DeletionsDoc;
     const byPath = new Map<string, DeletionEntry>();
     for (const e of [...(remote.deletions ?? []), ...(local.deletions ?? [])]) {
+      if (isPlaceholderDeletion(e)) continue;
       const prev = byPath.get(e.path);
       if (!prev || e.deleted_at > prev.deleted_at) byPath.set(e.path, e);
     }
@@ -444,7 +461,16 @@ export async function doSync(): Promise<SyncResult> {
             const rResp = await ghRequest('GET', `${base}/contents/${encodeURIComponent(rel)}`, pat);
             const remoteText = b64DecodeUtf8(rResp.content ?? '');
 
-            const [mergedText, hadConflict] = mergeTexts(baseText, content!, remoteText);
+            // When both sides added text, the merge keeps both and needs to know
+            // which came first. localMtime is this device's last edit from the
+            // note's history sidecar; the remote side uses its commit time — when
+            // the other device pushed rather than typed, but monotonic with it
+            // and already what last-write-wins trusts here.
+            const remoteEditedAt = await fetchCommitTime(base, pat, rel);
+            const [mergedText, hadConflict] = mergeTexts(baseText, content!, remoteText, {
+              localAt: localMtime,
+              remoteAt: remoteEditedAt,
+            });
             const mergedSha = await gitBlobSha(mergedText);
 
             if (mergedSha === ghSha) {
@@ -594,14 +620,20 @@ export async function doSync(): Promise<SyncResult> {
       }
 
       // Remove stale entries from .deletions.json so they don't cause false deletions on future syncs.
-      if (staleEntries.size > 0) {
+      // Placeholder-note entries go too: the merge strips them, but the merge only runs when the
+      // two sides differ, so an entry sitting in an already-identical log would otherwise survive.
+      const placeholderEntries = (doc.deletions ?? []).filter(isPlaceholderDeletion).length;
+      if (staleEntries.size > 0 || placeholderEntries > 0) {
         try {
           const fresh = JSON.parse(deletionsFile.textSync()) as DeletionsDoc;
           fresh.deletions = fresh.deletions.filter(
-            (d) => !(d.type === 'attachment' && staleEntries.has(d.path))
+            (d) => !(d.type === 'attachment' && staleEntries.has(d.path)) && !isPlaceholderDeletion(d)
           );
           deletionsFile.write(JSON.stringify(fresh, null, 2));
-          log(`deletions: removed ${staleEntries.size} stale attachment entr${staleEntries.size === 1 ? 'y' : 'ies'} from .deletions.json`);
+          if (staleEntries.size > 0)
+            log(`deletions: removed ${staleEntries.size} stale attachment entr${staleEntries.size === 1 ? 'y' : 'ies'} from .deletions.json`);
+          if (placeholderEntries > 0)
+            log(`deletions: removed ${placeholderEntries} placeholder-note entr${placeholderEntries === 1 ? 'y' : 'ies'} from .deletions.json`);
         } catch {}
       }
     } catch (e: any) {

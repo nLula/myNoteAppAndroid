@@ -79,13 +79,46 @@ function hasImageNode(node: any): boolean {
   return (node.children ?? []).some(hasImageNode);
 }
 
+/**
+ * markdown-it has no GFM task-list support, so "- [ ] item" reaches us as plain
+ * text and would render as literal brackets. The PC renders these as real
+ * checkboxes (marked.js emits <input type="checkbox">, tinted with the accent
+ * colour), so draw the same thing here.
+ *
+ * Restricted to list items on purpose: a paragraph that merely starts with
+ * "[ ]" is left exactly as written.
+ */
+const TASK_RE = /^\[([ xX])\](?:[ \t]+([\s\S]*))?$/;
+
+function taskMarker(content: string, parent: any): { checked: boolean; label: string } | null {
+  if (!Array.isArray(parent) || !parent.some((p: any) => p?.type === 'list_item')) return null;
+  const m = content.match(TASK_RE);
+  if (!m) return null;
+  return { checked: m[1].toLowerCase() === 'x', label: m[2] ?? '' };
+}
+
 function makeRules(t: Theme) {
   return {
-    text: (node: any, children: any, parent: any, styles: any, inheritedStyles = {}) => (
-      <Text key={node.key} style={[inheritedStyles, styles.text]} selectable>
-        {node.content}
-      </Text>
-    ),
+    text: (node: any, children: any, parent: any, styles: any, inheritedStyles = {}) => {
+      const task = taskMarker(node.content, parent);
+      if (task) {
+        return (
+          <Text key={node.key} style={[inheritedStyles, styles.text]} selectable>
+            <Feather
+              name={task.checked ? 'check-square' : 'square'}
+              size={14}
+              color={task.checked ? t.accent : t.textMuted}
+            />
+            {`  ${task.label}`}
+          </Text>
+        );
+      }
+      return (
+        <Text key={node.key} style={[inheritedStyles, styles.text]} selectable>
+          {node.content}
+        </Text>
+      );
+    },
     textgroup: (node: any, children: any, parent: any, styles: any) => (
       <Text key={node.key} style={styles.textgroup} selectable>
         {children}

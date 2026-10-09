@@ -22,6 +22,7 @@ import {
   writeNote,
   deleteNote,
   isNoteEncrypted,
+  isScratchNote,
   isSessionActive,
   lockNote,
   openLockedSession,
@@ -214,6 +215,28 @@ export default function NoteListScreen({ navigation }: any) {
     navigation.navigate('Editor', { name: fileName });
   }
 
+  // Locked notes start hidden behind their section header, as on the PC.
+  const [lockedExpanded, setLockedExpanded] = useState(false);
+  const lockedCollapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function toggleLocked() {
+    if (lockedCollapseTimer.current) {
+      clearTimeout(lockedCollapseTimer.current);
+      lockedCollapseTimer.current = null;
+    }
+    setLockedExpanded((wasOpen) => {
+      if (wasOpen) return false;
+      // Same five-minute auto-collapse the PC uses, so a list of locked notes
+      // doesn't sit open on screen indefinitely.
+      lockedCollapseTimer.current = setTimeout(() => setLockedExpanded(false), 5 * 60 * 1000);
+      return true;
+    });
+  }
+
+  useEffect(() => () => {
+    if (lockedCollapseTimer.current) clearTimeout(lockedCollapseTimer.current);
+  }, []);
+
   const [trashTarget, setTrashTarget] = useState<string | null>(null);
 
   function confirmDelete(name: string) {
@@ -391,7 +414,8 @@ export default function NoteListScreen({ navigation }: any) {
   }
 
   if (locked.length) {
-    sections.push({ title: 'Locked', data: locked });
+    // Collapsed means no rows; the header still renders and carries the count.
+    sections.push({ title: 'Locked', data: lockedExpanded ? locked : [] });
   }
 
   return (
@@ -534,7 +558,27 @@ export default function NoteListScreen({ navigation }: any) {
             scrollEventThrottle={16}
             renderSectionHeader={({ section }) => {
               if (!section.title) return null;
-              if (section.title !== 'Locked' && section.data.length <= 1) return null;
+              if (section.title === 'Locked') {
+                return (
+                  <Pressable
+                    onPress={toggleLocked}
+                    style={[styles.sectionHeader, styles.lockedHeader,
+                            { backgroundColor: t.bgBase, borderTopColor: t.border }]}
+                  >
+                    <Feather name="lock" size={11} color={t.textMuted} />
+                    <Text style={[styles.sectionHeaderText, styles.lockedLabel, { color: t.textMuted }]}>
+                      Locked
+                    </Text>
+                    <Text style={[styles.lockedCount, { color: t.textMuted, backgroundColor: t.bgRaised }]}>
+                      {locked.length}
+                    </Text>
+                    <Text style={[styles.lockedChevron, { color: t.textMuted }]}>
+                      {lockedExpanded ? '▾' : '▸'}
+                    </Text>
+                  </Pressable>
+                );
+              }
+              if (section.data.length <= 1) return null;
               return (
                 <View style={[styles.sectionHeader, { backgroundColor: t.bgBase }]}>
                   <Text style={[styles.sectionHeaderText, { color: t.textMuted }]}>{section.title}</Text>
@@ -543,9 +587,17 @@ export default function NoteListScreen({ navigation }: any) {
             }}
             renderItem={({ item }) => (
               <Pressable
-                style={[styles.card, { backgroundColor: t.bgSurface }]}
+                style={[
+                  styles.card,
+                  { backgroundColor: t.bgSurface },
+                  // Mark the always-present blank note so it stands out from
+                  // real notes in the list.
+                  isScratchNote(item.name) && { borderColor: t.accent },
+                ]}
                 onPress={() => onNotePress(item)}
-                onLongPress={() => confirmDelete(item.name)}
+                // No trash action for the scratch note — it is emptied and reused,
+                // never deleted, so don't offer a gesture that cannot work.
+                onLongPress={isScratchNote(item.name) ? undefined : () => confirmDelete(item.name)}
               >
                 <View style={styles.cardHeader}>
                   {isNoteEncrypted(item.name) && (
@@ -614,12 +666,28 @@ const styles = StyleSheet.create({
     marginVertical: 4,
     paddingHorizontal: 15,
     paddingVertical: 13,
+    // Every card carries the border, transparent by default, so highlighting
+    // one only changes its colour — no row grows or shifts relative to the rest.
+    borderWidth: 1,
+    borderColor: 'transparent',
   },
   cardHeader: { flexDirection: 'row', alignItems: 'center' },
   cardTitle: { fontSize: 16, fontWeight: '600', flex: 1 },
   cardDate: { fontSize: 12, marginTop: 5 },
   empty: { textAlign: 'center', marginTop: 48, fontSize: 14 },
   sectionHeader: { paddingHorizontal: 16, paddingTop: 14, paddingBottom: 4 },
+  // Mirrors the PC's locked group header: lock, label, count pill, triangle.
+  lockedHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 6,
+    paddingBottom: 8,
+    borderTopWidth: 1,
+  },
+  lockedLabel: { flex: 1 },
+  lockedCount: { fontSize: 10, fontWeight: '500', borderRadius: 8, paddingHorizontal: 6, paddingVertical: 1 },
+  lockedChevron: { fontSize: 11, marginLeft: 2 },
   sectionHeaderText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.6, textTransform: 'uppercase' },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'center', padding: 28 },
   modalBox: { borderRadius: 18, borderWidth: StyleSheet.hairlineWidth, padding: 24 },

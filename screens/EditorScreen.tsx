@@ -11,6 +11,8 @@ import {
   cleanUpRemovedAttachments,
   isScratchNote,
   promoteScratchNote,
+  scratchHasContent,
+  SCRATCH_DISPLAY_NAME,
   saveLockedSession,
   closeLockedSession,
   readActiveSessionBody,
@@ -26,6 +28,15 @@ import { runSync, isSyncing, onSyncStatus } from '../lib/syncStatus';
 // exceed a screenful of text; overshooting further only costs one intermediate
 // frame that is never settled on.
 const CARET_OVERSHOOT = 4000;
+
+// How long typing must pause before an unnamed note is filed under its heading.
+// Long enough not to fire mid-word while the heading is being written.
+const PROMOTE_IDLE_MS = 2000;
+
+// Work typed into the blank note must not sit only on the phone just because the
+// note was never closed. Three minutes after typing stops it is pushed — unless
+// the interval sync in App.tsx gets there first, whichever comes sooner.
+const SCRATCH_SYNC_IDLE_MS = 3 * 60 * 1000;
 
 function nowFileName(ext: string): string {
   const d = new Date();
@@ -47,6 +58,13 @@ export default function EditorScreen({ route, navigation }: any) {
   const [searchQuery, setSearchQuery] = useState('');
   const [matchIndex, setMatchIndex] = useState(0);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const promoteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scratchSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scratchSyncPending = useRef(false);
+  // Set the moment anything is typed. A synced version may replace what is on
+  // screen only while this is false — never on top of the user's own keystrokes.
+  const dirtyRef = useRef(false);
+  const loadedRef = useRef(false);
   const relockTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentRef = useRef('');
   const initialBodyRef = useRef<string | null>(null);
@@ -127,13 +145,100 @@ export default function EditorScreen({ route, navigation }: any) {
     moveCaretTo(matches[0], matches[0] + searchQuery.trim().length);
   }, [matches]);
 
+  // The file being edited can change underneath us: once the scratch note is
+  // given a heading it is renamed to a real note, and every write from that
+  // point has to follow it. Writing to the old name would recreate no_name.md
+  // holding a copy of the note that just graduated.
+  const fileNameRef = useRef(name);
+
   function persist(text: string) {
     contentRef.current = text;
     if (isLockedSession) {
-      saveLockedSession(name, text);
+      saveLockedSession(fileNameRef.current, text);
     } else {
-      autoSaveNoteBody(name, text);
+      autoSaveNoteBody(fileNameRef.current, text);
     }
+  }
+
+  /**
+   * Turn the scratch note into a real one as soon as it has a heading, named
+   * after that heading exactly as the new-note flow would name it. Runs off a
+   * generous idle delay rather than per keystroke, so a pause halfway through
+   * typing the heading doesn't file the note under half a title.
+   */
+  function promoteIfNamed() {
+    if (isLockedSession || !isScratchNote(fileNameRef.current)) return;
+    persist(contentRef.current);
+    try {
+      const promoted = promoteScratchNote();
+      if (promoted) {
+        fileNameRef.current = promoted;
+        console.log(`[scratch] saved as ${promoted}`);
+      }
+    } catch (e: any) {
+      console.warn('[scratch] could not save under its new name:', e?.message);
+    }
+  }
+
+  function cancelScratchSyncTimer() {
+    if (scratchSyncTimer.current) {
+      clearTimeout(scratchSyncTimer.current);
+      scratchSyncTimer.current = null;
+    }
+  }
+
+  /** Push what has been typed into the blank note, if it hasn't gone already. */
+  async function flushScratchSync() {
+    scratchSyncTimer.current = null;
+    if (!scratchSyncPending.current) return;
+    scratchSyncPending.current = false;
+    persist(contentRef.current);
+    try {
+      if (isSyncing()) return;
+      console.log('[scratch] idle — pushing unsaved work to GitHub');
+      await runSync();
+    } catch (e: any) {
+      console.warn('[scratch] idle push failed:', e?.message);
+    }
+  }
+
+  // Any sync — the interval one included — satisfies the same need, so a
+  // completed run clears the backstop. Three minutes is a deadline, not an
+  // extra sync stacked on top of the scheduled one.
+  //
+  // A finished sync may also have pulled a newer version of what is open. The
+  // app launches straight into the blank note, so without this the first thing
+  // shown after opening is whatever was on disk before the sync ran — the
+  // previous session's text, with the newer one only appearing on the next open.
+  useEffect(() => {
+    const unsub = onSyncStatus((nowSyncing) => {
+      if (nowSyncing) return;
+      scratchSyncPending.current = false;
+      cancelScratchSyncTimer();
+      adoptSyncedContent();
+    });
+    return unsub;
+  }, []);
+
+  /**
+   * Show what the sync just brought down. Skipped once the note has been typed
+   * into: unsaved keystrokes outrank a remote version, and the merge on the next
+   * sync is what reconciles the two — overwriting here would silently discard
+   * them instead.
+   */
+  function adoptSyncedContent() {
+    if (isLockedSession || dirtyRef.current || !loadedRef.current) return;
+    readNoteBody(fileNameRef.current)
+      .then((fresh) => {
+        if (dirtyRef.current || fresh === contentRef.current) return;
+        if (!fresh && contentRef.current) return; // vanished remotely — keep what we have
+        console.log(`[sync] ${fileNameRef.current}: showing the version just pulled`);
+        contentRef.current = fresh;
+        initialBodyRef.current = fresh;
+        setContent(fresh);
+        navigation.setOptions({ title: navTitleFromContent(fresh) });
+      })
+      .catch(() => {});
   }
 
   /**
@@ -150,11 +255,17 @@ export default function EditorScreen({ route, navigation }: any) {
     if (off > 0 && typeof startOffset === 'number') pendingCaretRef.current = off;
   }
 
+  /** Header text until a heading is typed. "no_name" is an internal filename. */
+  const untitledLabel = isScratchNote(name)
+    ? SCRATCH_DISPLAY_NAME
+    : name.replace(/\.md$/, '');
+
   function navTitleFromContent(text: string): string {
     // `[ \t]` not `\s` — see extractTitle in notes.ts: `\s` matches the newline,
     // so an empty heading would pick up the first line of the body.
     const m = text.match(/^#[ \t]+(.+)/m);
-    return m ? m[1].trim() : name.replace(/\.md$/, '');
+    const heading = m ? m[1].trim() : '';
+    return heading || untitledLabel;
   }
 
   useEffect(() => {
@@ -190,7 +301,7 @@ export default function EditorScreen({ route, navigation }: any) {
 
   useEffect(() => {
     navigation.setOptions({
-      title: name.replace(/\.md$/, ''),
+      title: untitledLabel,
       headerStyle: { backgroundColor: t.bgSurface },
       headerTintColor: t.textPrimary,
       headerRight: () => (
@@ -219,6 +330,7 @@ export default function EditorScreen({ route, navigation }: any) {
         initialBodyRef.current = text;
         applyStartPosition(text);
         navigation.setOptions({ title: navTitleFromContent(text) });
+        loadedRef.current = true;
         setLoaded(true);
         console.log(`[unlock] EditorScreen: setLoaded(true) called at ${Date.now() - tMount}ms`);
         const remaining = sessionRemainingMs(name);
@@ -239,27 +351,23 @@ export default function EditorScreen({ route, navigation }: any) {
         initialBodyRef.current = text;
         applyStartPosition(text);
         navigation.setOptions({ title: navTitleFromContent(text) });
+        loadedRef.current = true;
         setLoaded(true);
       });
     }
 
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
+      if (promoteTimer.current) clearTimeout(promoteTimer.current);
+      cancelScratchSyncTimer();
       if (relockTimer.current) clearTimeout(relockTimer.current);
       persist(contentRef.current);
       if (!isLockedSession) {
-        recordNoteHistory(name, initialBodyRef.current, contentRef.current);
-        cleanUpRemovedAttachments(name, initialBodyRef.current, contentRef.current);
-        // Last, so the content and history are written under the old name and
-        // then carried across: a named scratch note graduates to a real one.
-        if (isScratchNote(name)) {
-          try {
-            const promoted = promoteScratchNote();
-            if (promoted) console.log(`[scratch] saved as ${promoted}`);
-          } catch (e: any) {
-            console.warn('[scratch] could not save under its new name:', e?.message);
-          }
-        }
+        recordNoteHistory(fileNameRef.current, initialBodyRef.current, contentRef.current);
+        cleanUpRemovedAttachments(fileNameRef.current, initialBodyRef.current, contentRef.current);
+        // Still the fallback for a heading typed and left within the idle delay.
+        // A no-op once promoteIfNamed has already run.
+        promoteIfNamed();
       }
     };
   }, [name]);
@@ -276,11 +384,19 @@ export default function EditorScreen({ route, navigation }: any) {
         saveTimer.current = null;
       }
       persist(contentRef.current);
+      // File it under its heading now too, rather than leaving that to a timer
+      // that may never fire if the process is killed.
+      if (promoteTimer.current) {
+        clearTimeout(promoteTimer.current);
+        promoteTimer.current = null;
+      }
+      promoteIfNamed();
     });
     return () => sub.remove();
   }, [name, isLockedSession]);
 
   function onChange(text: string) {
+    dirtyRef.current = true;
     setContent(text);
     contentRef.current = text;
     navigation.setOptions({ title: navTitleFromContent(text) });
@@ -288,6 +404,19 @@ export default function EditorScreen({ route, navigation }: any) {
     saveTimer.current = setTimeout(() => {
       persist(text);
     }, 500);
+    if (promoteTimer.current) clearTimeout(promoteTimer.current);
+    if (isScratchNote(fileNameRef.current)) {
+      promoteTimer.current = setTimeout(promoteIfNamed, PROMOTE_IDLE_MS);
+    }
+    // Armed by real content only — spaces and tabs alone don't start the clock.
+    // One timer, restarted while typing continues, so a session produces a
+    // single deadline rather than one per keystroke. `name` rather than the live
+    // filename: work typed here still needs pushing after it graduates.
+    if (isScratchNote(name) && !isLockedSession && scratchHasContent(text)) {
+      scratchSyncPending.current = true;
+      cancelScratchSyncTimer();
+      scratchSyncTimer.current = setTimeout(flushScratchSync, SCRATCH_SYNC_IDLE_MS);
+    }
   }
 
   function insertMarkdown(link: string) {

@@ -180,6 +180,8 @@ function extractTitle(content: string, fallbackName: string): string {
   const m = body.match(/^#[ \t]+(.+)/m);
   const heading = m ? m[1].trim() : '';
   if (heading) return heading;
+  // "no_name" is a reserved filename, not something to show anyone.
+  if (fallbackName === SCRATCH_NOTE) return SCRATCH_DISPLAY_NAME;
   // Strip the _XXXXXXXX random suffix added by generateNoteFilename
   const base = fallbackName.replace(/\.md$/, '');
   const sm = base.match(/^(.+)_[A-Za-z0-9]{8}$/);
@@ -198,6 +200,8 @@ function extractTitle(content: string, fallbackName: string): string {
 
 export const SCRATCH_BASE = 'no_name';
 export const SCRATCH_NOTE = `${SCRATCH_BASE}.md`;
+/** What an unnamed scratch note is called on screen — the filename is internal. */
+export const SCRATCH_DISPLAY_NAME = 'New';
 /**
  * What a fresh scratch note contains: a heading marker waiting for a name, and
  * a blank line under it. The caret goes at the end — in the body — so typing
@@ -228,6 +232,15 @@ function headingOf(body: string): string | null {
 }
 
 /**
+ * True once something other than whitespace has been typed into a scratch note.
+ * The template's own "# " marker doesn't count, and neither do spaces or tabs on
+ * their own — so leaning on the space bar never makes the note look written-in.
+ */
+export function scratchHasContent(body: string): boolean {
+  return body.replace(/^#/, '').trim().length > 0;
+}
+
+/**
  * Makes sure the scratch note exists and reports where the caret belongs.
  * `caret` is non-null only while the note is still untouched, so a launch into
  * a blank note lands ready to type but one with work in it does not steal focus.
@@ -246,8 +259,7 @@ export function ensureScratchNote(): { name: string; caret: number | null } {
     return { name: SCRATCH_NOTE, caret: SCRATCH_TEMPLATE.length };
   }
   const body = bodyOf(file);
-  const untouched = body.trim() === '' || body.trim() === '#';
-  return { name: SCRATCH_NOTE, caret: untouched ? body.length : null };
+  return { name: SCRATCH_NOTE, caret: scratchHasContent(body) ? null : body.length };
 }
 
 /**
@@ -524,6 +536,11 @@ function setTrashedAt(name: string, ts: number | null): void {
 
 /** Send a note to Trash: adds the 'trash' tag and sets trashed_at — same scheme the PC app uses. */
 export async function deleteNote(name: string): Promise<void> {
+  // The scratch note is a fixture, not a document: it is emptied and reused, so
+  // it must never end up in Trash. Trashing it hides the note every launch opens
+  // into, and emptying the Trash afterwards records it as deleted — which then
+  // stops every device accepting it again.
+  if (isScratchNote(name)) return;
   const tags = getTags(name);
   if (!tags.includes(TRASH_TAG)) tags.push(TRASH_TAG);
   setTags(name, tags);
